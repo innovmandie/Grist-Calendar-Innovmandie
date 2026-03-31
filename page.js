@@ -162,6 +162,7 @@ class CalendarHandler {
         dayNames: ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'],
         alldayView: false,
         workweek: true,
+        isAlways6Weeks: false,
       },
       
       usageStatistics: false,
@@ -290,6 +291,183 @@ class CalendarHandler {
 
     // Ids of visible events that fall within the current date range. */
     this._visibleEventIds = new Set();
+
+    this._monthLayoutFrame = null;
+    this._setupMonthMutationObserver();
+  }
+
+  _setupMonthMutationObserver() {
+    const container = document.getElementById('calendar');
+    let rafId = null;
+    this._mutationObserver = new MutationObserver(() => {
+      if (this.calendar.getViewName() !== 'month') { return; }
+      if (rafId) { cancelAnimationFrame(rafId); }
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        this._updateMonthGridVisibility();
+      });
+    });
+    this._mutationObserver.observe(container, {childList: true, subtree: true});
+  }
+
+  _cloneCalendarDate(sourceDate, nextValue) {
+    return TZDate && sourceDate instanceof TZDate ? new TZDate(nextValue) : new Date(nextValue);
+  }
+
+  _getCurrentMonthRange() {
+    const renderDate = this.calendar.getDate().toDate();
+    const monthStart = new Date(renderDate.getFullYear(), renderDate.getMonth(), 1);
+    const monthEnd = new Date(renderDate.getFullYear(), renderDate.getMonth() + 1, 0, 23, 59, 59, 999);
+    return {monthStart, monthEnd};
+  }
+
+  _getVisibleDateRange() {
+    if (this.calendar.getViewName() === 'month') {
+      return this._getCurrentMonthRange();
+    }
+
+    return {
+      monthStart: this.calendar.getDateRangeStart(),
+      monthEnd: this.calendar.getDateRangeEnd().setHours(23, 59, 59, 999),
+    };
+  }
+
+  _clipMonthViewEvent(event, monthStart, monthEnd) {
+    if (this.calendar.getViewName() !== 'month') {
+      return event;
+    }
+
+    const clippedStart = event.start < monthStart ? this._cloneCalendarDate(event.start, monthStart) : event.start;
+    const clippedEnd = event.end > monthEnd ? this._cloneCalendarDate(event.end, monthEnd) : event.end;
+
+    if (clippedStart === event.start && clippedEnd === event.end) {
+      return event;
+    }
+
+    return {
+      ...event,
+      start: clippedStart,
+      end: clippedEnd,
+    };
+  }
+
+  _getMonthDateMatrix() {
+    const renderDate = this.calendar.getDate().toDate();
+    const monthOptions = this.calendar.getOptions().month ?? {};
+    const workweek = monthOptions.workweek ?? false;
+    const startDayOfWeek = monthOptions.startDayOfWeek ?? 0;
+    const isAlways6Weeks = monthOptions.isAlways6Weeks ?? true;
+
+    const firstDayOfMonth = new Date(renderDate.getFullYear(), renderDate.getMonth(), 1);
+    const firstDateOfMatrix = new Date(firstDayOfMonth);
+    const dayOffset = firstDayOfMonth.getDay() - startDayOfWeek +
+      (firstDayOfMonth.getDay() < startDayOfWeek ? 7 : 0);
+    firstDateOfMatrix.setDate(firstDayOfMonth.getDate() - dayOffset);
+
+    const dayOfFirstDateOfMatrix = firstDateOfMatrix.getDay();
+    const totalDatesCountOfMonth = new Date(renderDate.getFullYear(), renderDate.getMonth() + 1, 0).getDate();
+    const initialDifference = Math.round((firstDayOfMonth - firstDateOfMatrix) / (24 * 60 * 60 * 1000));
+    const totalDatesOfMatrix = totalDatesCountOfMonth + Math.abs(initialDifference);
+    const totalWeeks = isAlways6Weeks ? 6 : Math.ceil(totalDatesOfMatrix / 7);
+
+    return Array.from({length: totalWeeks}, (_, weekIndex) => {
+      const row = [];
+
+      for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek += 1) {
+        const steps = weekIndex * 7 + dayOfWeek;
+        const currentDay = (steps + dayOfFirstDateOfMatrix) % 7;
+        if (workweek && (currentDay === 0 || currentDay === 6)) {
+          continue;
+        }
+
+        const date = new Date(firstDateOfMatrix);
+        date.setDate(firstDateOfMatrix.getDate() + steps);
+        row.push(date);
+      }
+
+      return row;
+    });
+  }
+
+  _updateMonthGridVisibility() {
+    const container = document.getElementById('calendar');
+    container.querySelectorAll('.calendar-month-leading-outside-current-month').forEach((cell) => {
+      cell.classList.remove('calendar-month-leading-outside-current-month');
+    });
+    container.querySelectorAll('.calendar-month-trailing-outside-current-month').forEach((cell) => {
+      cell.classList.remove('calendar-month-trailing-outside-current-month');
+    });
+    container.querySelectorAll('.calendar-month-empty-row').forEach((row) => {
+      row.classList.remove('calendar-month-empty-row');
+    });
+    container.querySelectorAll('.calendar-month-last-visible-cell').forEach((cell) => {
+      cell.classList.remove('calendar-month-last-visible-cell');
+    });
+
+    if (this.calendar.getViewName() !== 'month') {
+      return;
+    }
+
+    const renderDate = this.calendar.getDate().toDate();
+    const month = renderDate.getMonth();
+    const year = renderDate.getFullYear();
+    const dateMatrix = this._getMonthDateMatrix();
+    const rows = container.querySelectorAll('.toastui-calendar-month-week-item');
+
+    rows.forEach((row, rowIndex) => {
+      const cells = row.querySelectorAll('.toastui-calendar-daygrid-cell');
+      const weekDates = dateMatrix[rowIndex] ?? [];
+      let lastVisibleCell = null;
+
+      cells.forEach((cell, cellIndex) => {
+        const date = weekDates[cellIndex];
+        const isCurrentMonth = date && date.getMonth() === month && date.getFullYear() === year;
+        const isPreviousMonth = date && (date.getFullYear() < year ||
+          (date.getFullYear() === year && date.getMonth() < month));
+        const isTrailingMonth = date && !isCurrentMonth && !isPreviousMonth;
+
+        cell.classList.toggle('calendar-month-leading-outside-current-month', Boolean(isPreviousMonth));
+        cell.classList.toggle('calendar-month-trailing-outside-current-month', Boolean(isTrailingMonth));
+
+        if (!isTrailingMonth) {
+          lastVisibleCell = cell;
+        }
+      });
+
+      lastVisibleCell?.classList.add('calendar-month-last-visible-cell');
+
+      // Hide the entire row if every cell is a trailing next-month day.
+      const allTrailing = weekDates.length > 0 && weekDates.every((date) => {
+        if (!date) { return true; }
+        const isCurrentMonth = date.getMonth() === month && date.getFullYear() === year;
+        const isPreviousMonth = date.getFullYear() < year ||
+          (date.getFullYear() === year && date.getMonth() < month);
+        return !isCurrentMonth && !isPreviousMonth;
+      });
+      row.classList.toggle('calendar-month-empty-row', allTrailing);
+      // Reset any previously forced height so the recalculation below is clean.
+      row.style.height = '';
+    });
+
+    // Redistribute height equally among visible rows so they fill the container.
+    const visibleRows = Array.from(rows).filter(
+      (row) => !row.classList.contains('calendar-month-empty-row')
+    );
+    if (visibleRows.length > 0) {
+      const rowHeightPct = (100 / visibleRows.length).toFixed(6) + '%';
+      visibleRows.forEach((row) => { row.style.height = rowHeightPct; });
+    }
+  }
+
+  syncMonthGridVisibility() {
+    if (this._monthLayoutFrame) {
+      cancelAnimationFrame(this._monthLayoutFrame);
+    }
+
+    this._monthLayoutFrame = requestAnimationFrame(() => {
+      this._monthLayoutFrame = null;
+      this._updateMonthGridVisibility();
+    });
   }
 
   _isMultidayInMonthViewEvent(rec)  {
@@ -408,8 +586,7 @@ class CalendarHandler {
    */
   renderVisibleEvents() {
     const newVisibleEventIds = new Set();
-    const dateRangeStart = this.calendar.getDateRangeStart();
-    const dateRangeEnd = this.calendar.getDateRangeEnd().setHours(23, 99, 99, 999);
+    const {monthStart: dateRangeStart, monthEnd: dateRangeEnd} = this._getVisibleDateRange();
 
     // Add or update events that are now visible.
     for (const event of this._allEvents.values()) {
@@ -419,12 +596,14 @@ class CalendarHandler {
         (event.start < dateRangeStart && event.end > dateRangeEnd)
       );
       if (!isEventInRange) { continue; }
+
+      const displayEvent = this._clipMonthViewEvent(event, dateRangeStart, dateRangeEnd);
   
       const calendarEvent = this.calendar.getEvent(event.id, CALENDAR_NAME);
       if (!calendarEvent) {
-        this.calendar.createEvents([event]);
+        this.calendar.createEvents([displayEvent]);
       } else {
-        this.calendar.updateEvent(event.id, CALENDAR_NAME, event);
+        this.calendar.updateEvent(event.id, CALENDAR_NAME, displayEvent);
       }
       newVisibleEventIds.add(event.id);
     }
@@ -500,6 +679,7 @@ function getGristOptions() {
 
 function updateUIAfterNavigation() {
   calendarHandler.renderVisibleEvents();
+  calendarHandler.syncMonthGridVisibility();
   // update name of the month and year displayed on the top of the widget
   document.getElementById('calendar-title').innerText = getMonthName();
   // refresh colors of selected event (in month view it's different from in other views)
